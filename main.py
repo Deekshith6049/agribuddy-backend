@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from supabase import create_client
@@ -23,8 +24,17 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 # ================= FASTAPI =================
 app = FastAPI(
     title="AGRIBudy AI Assistant Backend",
-    version="1.1.0",
-    description="AI-powered agriculture advisor with voice output"
+    version="1.2.0",
+    description="AI-powered agriculture advisor with multilingual voice support"
+)
+
+# ================= CORS (CRITICAL FIX) =================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # allow all during development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ================= AUDIO STORAGE =================
@@ -32,6 +42,7 @@ AUDIO_DIR = "audio"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 
+# ================= MODELS =================
 class ChatRequest(BaseModel):
     message: str
     voice: bool = False
@@ -49,13 +60,8 @@ def detect_language(text: str) -> str:
         return "Hindi"
     return "English"
 
-def map_tts_language(language: str) -> str:
-    # gTTS language codes
-    if language == "Hindi":
-        return "hi"
-    if language == "Telugu":
-        return "te"
-    return "en"
+def tts_language(language: str) -> str:
+    return {"English": "en", "Hindi": "hi", "Telugu": "te"}.get(language, "en")
 
 def get_latest_sensor_data() -> str:
     res = supabase.table("Soil_data") \
@@ -75,14 +81,10 @@ def get_latest_sensor_data() -> str:
         f"Pest Detected: {d.get('pest_detected')}."
     )
 
-def generate_voice(text: str, language: str) -> str:
-    lang_code = map_tts_language(language)
+def generate_audio(text: str, language: str) -> str:
     filename = f"{uuid.uuid4()}.mp3"
-    filepath = os.path.join(AUDIO_DIR, filename)
-
-    tts = gTTS(text=text, lang=lang_code)
-    tts.save(filepath)
-
+    path = os.path.join(AUDIO_DIR, filename)
+    gTTS(text=text, lang=tts_language(language)).save(path)
     return f"/audio/{filename}"
 
 # ================= AI CHAT =================
@@ -93,7 +95,7 @@ def ai_chat(req: ChatRequest):
 
     system_prompt = (
         "You are AGRIBudy AI, a farmer-friendly agriculture advisor. "
-        "Give short, clear, practical recommendations and warnings."
+        "Provide short, clear, practical recommendations and warnings."
     )
 
     user_prompt = (
@@ -116,7 +118,7 @@ def ai_chat(req: ChatRequest):
 
     audio_url = None
     if req.voice:
-        audio_url = generate_voice(reply_text, language)
+        audio_url = generate_audio(reply_text, language)
 
     return {
         "language": language,
@@ -127,4 +129,4 @@ def ai_chat(req: ChatRequest):
 
 @app.get("/")
 def health():
-    return {"status": "AGRIBudy backend running with voice output"}
+    return {"status": "AGRIBudy backend running (CORS enabled)"}
