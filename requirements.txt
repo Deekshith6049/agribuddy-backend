@@ -5,3 +5,8 @@ supabase
 langdetect
 groq
 gtts
+
+opencv-python-headless
+numpy
+requests
+pillow
