@@ -10,7 +10,7 @@ from groq import Groq
 from gtts import gTTS
 import uuid
 
-# === NEW IMPORTS (SAFE) ===
+# === IMAGE / CV ===
 import cv2
 import numpy as np
 import requests
@@ -31,8 +31,8 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 # ================= FASTAPI =================
 app = FastAPI(
     title="AGRIBudy AI Assistant Backend",
-    version="1.3.0",
-    description="AI-powered agriculture advisor with camera-based pest severity & multilingual voice support"
+    version="1.4.0",
+    description="Camera-based pest severity + real-time soil intelligence"
 )
 
 # ================= CORS =================
@@ -44,7 +44,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================= AUDIO STORAGE =================
+# ================= AUDIO =================
 AUDIO_DIR = "audio"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
@@ -54,51 +54,54 @@ class ChatRequest(BaseModel):
     message: str
     voice: bool = False
 
-# ================= LANGUAGE UTILS =================
+# ================= LANGUAGE =================
 def detect_language(text: str) -> str:
     try:
         code = detect(text)
     except:
-        code = "en"
-
+        return "English"
     return {"te": "Telugu", "hi": "Hindi"}.get(code, "English")
 
 def tts_language(language: str) -> str:
     return {"English": "en", "Hindi": "hi", "Telugu": "te"}.get(language, "en")
 
-# ================= SENSOR DATA =================
-def get_latest_sensor_data() -> str:
+# ================= SENSOR FETCH (COLUMN-BASED) =================
+def get_latest_non_null(column: str):
     res = supabase.table("Soil_data") \
-        .select("*") \
+        .select(column) \
+        .not_.is_(column, None) \
+        .order("monitored_at", desc=True) \
+        .limit(1) \
+        .execute()
+    return res.data[0][column] if res.data else None
+
+def get_latest_sensor_data():
+    return {
+        "temperature": get_latest_non_null("temperature"),
+        "humidity": get_latest_non_null("humidity"),
+        "soil_moisture": get_latest_non_null("soil_moisture"),
+        "soil_ph": get_latest_non_null("soil_ph"),
+        "nitrogen": get_latest_non_null("nitrogen"),
+        "phosphorus": get_latest_non_null("phosphorus"),
+        "potassium": get_latest_non_null("potassium"),
+        "pest_detected": get_latest_non_null("pest_detected")
+    }
+
+# ================= IMAGE FETCH (FIXED) =================
+def get_latest_pest_image_url():
+    res = supabase.table("Soil_data") \
+        .select("pest_image_url") \
+        .not_.is_("pest_image_url", None) \
         .order("monitored_at", desc=True) \
         .limit(1) \
         .execute()
 
     if not res.data:
-        return "No sensor data available."
-
-    d = res.data[0]
-    return (
-        f"Temperature: {d.get('temperature')}°C, "
-        f"Humidity: {d.get('humidity')}%, "
-        f"Soil Moisture: {d.get('soil_moisture')}%, "
-        f"Pest Detected: {d.get('pest_detected')}."
-    )
-
-# ================= CAMERA IMAGE =================
-def get_latest_pest_image_url():
-    res = supabase.table("Soil_data") \
-        .select("pest_image_url") \
-        .order("monitored_at", desc=True) \
-        .limit(1) \
-        .execute()
-
-    if not res.data or not res.data[0].get("pest_image_url"):
         return None
 
     return res.data[0]["pest_image_url"]
 
-# ================= PEST SEVERITY ANALYSIS =================
+# ================= PEST SEVERITY (HIGH SENSITIVITY) =================
 def analyze_pest_severity(image_url: str) -> str:
     try:
         response = requests.get(image_url, timeout=6)
@@ -107,23 +110,25 @@ def analyze_pest_severity(image_url: str) -> str:
 
         hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
 
-        green = cv2.inRange(hsv, (35, 40, 40), (85, 255, 255))
-        yellow = cv2.inRange(hsv, (18, 50, 50), (35, 255, 255))
-        brown = cv2.inRange(hsv, (5, 60, 30), (20, 255, 200))
+        green = cv2.inRange(hsv, (30, 30, 30), (90, 255, 255))
+        yellow = cv2.inRange(hsv, (15, 40, 40), (35, 255, 255))
+        brown = cv2.inRange(hsv, (0, 40, 20), (20, 255, 200))
+        dark = cv2.inRange(hsv, (0, 0, 0), (180, 255, 50))
 
         total = img_np.shape[0] * img_np.shape[1]
 
-        green_ratio = np.count_nonzero(green) / total
-        yellow_ratio = np.count_nonzero(yellow) / total
-        brown_ratio = np.count_nonzero(brown) / total
+        g = np.count_nonzero(green) / total
+        y = np.count_nonzero(yellow) / total
+        b = np.count_nonzero(brown) / total
+        d = np.count_nonzero(dark) / total
 
-        # === Tuned thresholds (field-safe) ===
-        if brown_ratio > 0.06:
+        # 🔥 VERY SENSITIVE THRESHOLDS
+        if d > 0.10 or b > 0.10:
             return "HIGH"
-        elif yellow_ratio > 0.10:
+        elif y > 0.10 or g < 0.60:
             return "MEDIUM"
-        elif green_ratio < 0.55:
-            return "MEDIUM"
+        elif g > 0.10:
+            return "LOW"
         else:
             return "LOW"
 
@@ -132,11 +137,11 @@ def analyze_pest_severity(image_url: str) -> str:
 
 # ================= TELUGU ENRICHMENT =================
 def enrich_telugu(text: str) -> str:
-    if len(text) < 200:
+    if len(text) < 220:
         text += (
             "\n\n👉 రైతులకు సూచన:\n"
-            "ఈ సమస్యను నిర్లక్ష్యం చేయకుండా వెంటనే చర్యలు తీసుకుంటే "
-            "పంట నష్టం తగ్గించవచ్చు. క్రమం తప్పకుండా పొలాన్ని పరిశీలించడం చాలా అవసరం."
+            "ఈ పరిస్థితిని గమనించి ముందస్తు చర్యలు తీసుకుంటే "
+            "పంట ఆరోగ్యం మెరుగుపడుతుంది."
         )
     return text
 
@@ -151,23 +156,21 @@ def generate_audio(text: str, language: str) -> str:
 @app.post("/api/ai/chat")
 def ai_chat(req: ChatRequest):
     language = detect_language(req.message)
-    sensor_context = get_latest_sensor_data()
+    sensors = get_latest_sensor_data()
 
     image_url = get_latest_pest_image_url()
-    pest_severity = "UNKNOWN"
-    if image_url:
-        pest_severity = analyze_pest_severity(image_url)
+    pest_severity = analyze_pest_severity(image_url) if image_url else "UNKNOWN"
 
     system_prompt = (
-        "You are AGRIBudy AI, a farmer-friendly agriculture advisor. "
-        "Give practical, field-ready advice. Be clear and calm."
+        "You are AGRIBudy AI, a practical agriculture advisor. "
+        "Provide clear, actionable farming guidance."
     )
 
     user_prompt = (
-        f"Live sensor data: {sensor_context}\n"
-        f"Pest risk level based on plant image: {pest_severity}\n"
-        f"User question: {req.message}\n"
-        f"Respond in {language} with actionable steps."
+        f"Sensor Data: {sensors}\n"
+        f"Pest Risk Level: {pest_severity}\n"
+        f"User Question: {req.message}\n"
+        f"Respond in {language}."
     )
 
     response = groq_client.chat.completions.create(
@@ -180,21 +183,33 @@ def ai_chat(req: ChatRequest):
         max_tokens=350
     )
 
-    reply_text = response.choices[0].message.content.strip()
+    reply = response.choices[0].message.content.strip()
 
     if language == "Telugu":
-        reply_text = enrich_telugu(reply_text)
+        reply = enrich_telugu(reply)
 
-    audio_url = generate_audio(reply_text, language) if req.voice else None
+    audio_url = generate_audio(reply, language) if req.voice else None
 
     return {
         "language": language,
-        "reply_text": reply_text,
+        "reply_text": reply,
         "voice_enabled": req.voice,
         "audio_url": audio_url,
-        "pest_severity": pest_severity
+        "pest_severity": pest_severity,
+        "image_used": image_url
+    }
+
+# ================= DIRECT API =================
+@app.get("/api/pest-severity")
+def pest_severity():
+    image_url = get_latest_pest_image_url()
+    if not image_url:
+        return {"pest_severity": "UNKNOWN"}
+    return {
+        "pest_severity": analyze_pest_severity(image_url),
+        "image_used": image_url
     }
 
 @app.get("/")
 def health():
-    return {"status": "AGRIBudy backend running (camera + AI enabled)"}
+    return {"status": "AGRIBudy backend running successfully 🚀"}
