@@ -123,7 +123,7 @@ def analyze_pest_severity(image_url: str) -> str:
         d = np.count_nonzero(dark) / total
 
         # 🔥 VERY SENSITIVE THRESHOLDS
-        if d > 0.10 or b > 0.10:
+        if d > 0.80 or b > 0.80:
             return "HIGH"
         elif y > 0.10 or g < 0.60:
             return "MEDIUM"
